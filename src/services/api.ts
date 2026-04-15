@@ -1,5 +1,9 @@
 const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL;
-const BASE_URL = configuredBaseUrl?.replace(/\/$/, '') ?? `${window.location.origin}/api`;
+const isLocalhostBaseUrl = configuredBaseUrl?.startsWith('http://localhost') || configuredBaseUrl?.startsWith('https://localhost');
+const runtimeBaseUrl = `${window.location.origin}/api`;
+const BASE_URL = configuredBaseUrl && (!isLocalhostBaseUrl || window.location.hostname === 'localhost')
+  ? configuredBaseUrl.replace(/\/$/, '')
+  : runtimeBaseUrl;
 
 function getToken(): string | null {
   return localStorage.getItem('taxtalk_token');
