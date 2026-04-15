@@ -1,26 +1,34 @@
-import React, { useState, useEffect, useRef, useMemo, type KeyboardEvent } from 'react';
-import { Send, ArrowLeft, Bot, Lightbulb } from 'lucide-react';
-import type { User } from '../types';
+import React, { useState, useEffect, useRef, useMemo, useCallback, type KeyboardEvent } from 'react';
+import { Send, ArrowLeft, Bot, Paperclip, X } from 'lucide-react';
+import type { User, TaxbotMessage, ApiResponse, TaxbotConversation } from '../types';
 import { useAuth } from '../contexts/AuthContext';
 import { useChat } from '../hooks/useChat';
-import { getTaxBotResponse, getFollowUpSuggestions } from '../utils/taxbotResponses';
+import { api, apiFetch } from '../services/api';
 
-/**
- * Notes on fix:
- * - Avoided using the selectedContact object in useEffect dependency array.
- *   selectedContact was being recomputed each render (new object identity)
- *   causing the effect to run repeatedly and producing the "Maximum update depth exceeded" error.
- * - Memoized availableContacts and selectedContact so references are stable.
- * - Only call markMessagesAsRead when there are unread messages. This avoids unnecessary state churn.
- * - Kept debug logs to help trace if any further loops appear.
- */
+const TAXBOT_ID = 'ai-taxbot';
 
-interface LocalMessage {
+const ALLOWED_MIME_TYPES = [
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+];
+
+interface AttachmentState {
+  data: string;
+  name: string;
+  type: string;
+}
+
+interface SidebarContact {
   id: string;
-  senderId: string;
-  receiverId: string;
-  content: string;
-  timestamp: number;
+  fullName: string;
+  profileImage: string | null;
+  role: string;
+  isBot?: boolean;
+  unreadCount?: number;
+  lastContent?: string | null;
 }
 
 interface MessagingInterfaceProps {
@@ -29,348 +37,291 @@ interface MessagingInterfaceProps {
   initialContactId?: string;
 }
 
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString('en-IN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+  });
+}
+
+function avatarSrc(fullName: string, profileImage: string | null): string {
+  return (
+    profileImage ??
+    `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(fullName)}`
+  );
+}
+
 export function MessagingInterface({ users, onBack, initialContactId }: MessagingInterfaceProps) {
   const { currentUser } = useAuth();
-  const { sendMessage, getMessagesForChat, getChatForUsers, getUnreadCount, markMessagesAsRead } = useChat();
-
-  const [selectedContactId, setSelectedContactId] = useState<string | null>(initialContactId || null);
+  const [selectedContactId, setSelectedContactId] = useState<string | null>(
+    initialContactId ?? null
+  );
   const [messageText, setMessageText] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [localMessages, setLocalMessages] = useState<LocalMessage[]>([]);
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [attachment, setAttachment] = useState<AttachmentState | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const aiChatbot: User = {
-    id: 'ai-chatbot',
-    name: 'TaxBot AI',
-    email: 'ai@taxtalk.com',
-    phone: 'AI Assistant',
-    profileImage: 'https://api.dicebear.com/7.x/bottts/svg?seed=ai',
-    userType: 'ca',
-  };
+  // TaxBot-specific state
+  const [taxbotConvId, setTaxbotConvId] = useState<string | null>(null);
+  const [taxbotLoading, setTaxbotLoading] = useState(false);
+  const [taxbotMessages, setTaxbotMessages] = useState<TaxbotMessage[]>([]);
+  const [streamingContent, setStreamingContent] = useState('');
+  const [isBotThinking, setIsBotThinking] = useState(false);
 
-  // Memoize availableContacts so identity doesn't change each render
-  const availableContacts = useMemo(() => {
-    return [
-      aiChatbot,
-      ...users.filter(user => {
-        if (!currentUser) return false;
-        if (currentUser.userType === 'user') {
-          return user.userType === 'ca' && user.id !== currentUser.id;
-        } else {
-          return user.userType === 'user' && user.id !== currentUser.id;
-        }
-      })
-    ];
-  }, [users, currentUser]);
+  const isBot = selectedContactId === TAXBOT_ID;
+  const chatContactId = isBot ? undefined : (selectedContactId ?? undefined);
 
-  // Memoize selectedContact based on selectedContactId and memoized availableContacts
-  const selectedContact = useMemo(() => {
-    return selectedContactId ? availableContacts.find(c => c.id === selectedContactId) : undefined;
-  }, [selectedContactId, availableContacts]);
+  const { messages, chats, sendMessage, markAsRead } = useChat(
+    currentUser?.id,
+    chatContactId
+  );
 
-  // robust send wrapper (keeps previous behavior)
-  const trySend = async (receiverId: string, content: string, senderId: string) => {
-    if (!sendMessage) {
-      console.error('useChat.sendMessage is not available');
-      throw new Error('sendMessage missing');
-    }
+  // Sidebar contacts: TaxBot first, then all users
+  const sidebarContacts = useMemo((): SidebarContact[] => {
+    const taxbot: SidebarContact = {
+      id: TAXBOT_ID,
+      fullName: 'TaxBot AI',
+      profileImage: 'https://api.dicebear.com/7.x/bottts/svg?seed=taxbot',
+      role: 'bot',
+      isBot: true,
+    };
 
-    try {
-      // preferred signature: (receiver, content, sender)
-      // @ts-ignore
-      const res = await sendMessage(receiverId, content, senderId);
-      console.debug('sendMessage succeeded as (receiver, content, sender)', { receiverId, content, senderId, res });
-      return res;
-    } catch (err1) {
-      console.debug('sendMessage (receiver, content, sender) failed:', err1);
+    const userContacts = (users ?? [])
+      .filter(u => u.id !== currentUser?.id)
+      .map(u => {
+        const chat = chats.find(c => c.otherUser.id === u.id);
+        return {
+          id: u.id,
+          fullName: u.fullName,
+          profileImage: u.profileImage,
+          role: u.role,
+          unreadCount: chat?.unreadCount ?? 0,
+          lastContent: chat?.lastContent ?? null,
+        };
+      });
+
+    return [taxbot, ...userContacts];
+  }, [users, currentUser, chats]);
+
+  const selectedContact = useMemo(
+    () => sidebarContacts.find(c => c.id === selectedContactId),
+    [sidebarContacts, selectedContactId]
+  );
+
+  // Load TaxBot conversation history when TaxBot is selected
+  useEffect(() => {
+    if (!isBot || !currentUser) return;
+
+    const load = async () => {
+      setTaxbotLoading(true);
       try {
-        // alternate signature: (sender, receiver, content)
-        // @ts-ignore
-        const res2 = await sendMessage(senderId, receiverId, content);
-        console.debug('sendMessage succeeded as (sender, receiver, content)', { senderId, receiverId, content, res2 });
-        return res2;
-      } catch (err2) {
-        console.error('sendMessage failed for both tried signatures', err1, err2);
-        throw err2;
+        const listRes = await api.get<ApiResponse<TaxbotConversation[]>>('/taxbot/conversations');
+        const existing = listRes.data[0];
+        if (existing) {
+          setTaxbotConvId(existing.id);
+          const convRes = await api.get<ApiResponse<TaxbotConversation>>(
+            `/taxbot/conversations/${existing.id}`
+          );
+          setTaxbotMessages(convRes.data.messages ?? []);
+        } else {
+          const newRes = await api.post<ApiResponse<TaxbotConversation>>(
+            '/taxbot/conversations',
+            { topic: 'General Tax Advice' }
+          );
+          setTaxbotConvId(newRes.data.id);
+          setTaxbotMessages([]);
+        }
+      } catch {
+        // fail silently — user can still type, send will be disabled
+      } finally {
+        setTaxbotLoading(false);
       }
-    }
-  };
+    };
 
-  // reload canonical messages and merge with optimistic local messages
-  const reloadMessages = () => {
-    if (!currentUser || !selectedContactId) {
-      setLocalMessages([]);
+    void load();
+  }, [isBot, currentUser]);
+
+  // Mark incoming messages as read when thread opens
+  useEffect(() => {
+    if (isBot || !currentUser) return;
+    const unread = messages.filter(m => !m.isRead && m.receiverId === currentUser.id);
+    unread.forEach(m => void markAsRead(m.id));
+  }, [isBot, messages, currentUser, markAsRead]);
+
+  // Scroll to bottom on new content
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages.length, taxbotMessages.length, streamingContent, isBotThinking]);
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setAttachmentError(null);
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      setAttachmentError('File must be under 5MB');
       return;
     }
-    try {
-      const fetched = (getMessagesForChat(currentUser.id, selectedContactId) || []) as any[];
-      const normalizedFetched: LocalMessage[] = fetched.map(m => ({
-        id: m.id ?? `${m.senderId}-${m.timestamp}-${Math.random()}`,
-        senderId: m.senderId,
-        receiverId: m.receiverId ?? (m.senderId === currentUser.id ? selectedContactId : currentUser.id),
-        content: m.content,
-        timestamp: m.timestamp ?? Date.now()
-      }));
-
-      // Merge fetched + optimistic local messages that are not yet in fetched
-      const fetchedIds = new Set(normalizedFetched.map(m => m.id));
-      const merged = [
-        ...normalizedFetched,
-        ...localMessages.filter(local => {
-          if (fetchedIds.has(local.id)) return false;
-          return !normalizedFetched.some(f => f.content === local.content && Math.abs(f.timestamp - local.timestamp) < 2000);
-        })
-      ];
-
-      merged.sort((a, b) => a.timestamp - b.timestamp);
-      setLocalMessages(merged);
-    } catch (err) {
-      console.error('reloadMessages failed:', err);
-    }
-  };
-
-  useEffect(() => {
-    reloadMessages();
-    // only depend on stable values — avoid object references that change each render
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedContactId, currentUser?.id, refreshKey]);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [localMessages.length, isTyping]);
-
-  // Mark messages as read and show suggestions — IMPORTANT: depend only on id/currentUser to avoid loops
-  useEffect(() => {
-    if (!selectedContactId || !currentUser) return;
-
-    try {
-      // Only call markMessagesAsRead if there are unread messages to avoid triggering unnecessary state updates
-      const unread = getUnreadCount(currentUser.id, selectedContactId);
-      if (unread && unread > 0) {
-        markMessagesAsRead(currentUser.id, selectedContactId);
-      }
-    } catch (err) {
-      console.warn('markMessagesAsRead failed:', err);
+    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+      setAttachmentError('Only PDF, images, Word, and Excel files are allowed');
+      return;
     }
 
-    // handle suggestions + AI welcome
-    if (selectedContactId === 'ai-chatbot') {
-      const initialSuggestions = [
-        "How to file Income Tax Return?",
-        "GST registration process",
-        "Tax saving investment options",
-        "TDS rates and compliance"
-      ];
-      setSuggestions(initialSuggestions);
-      setShowSuggestions(true);
-
-      const existingMessages = getMessagesForChat(currentUser.id, 'ai-chatbot') || [];
-      if (existingMessages.length === 0) {
-        setTimeout(async () => {
-          const welcomeMessage = "Hello! 👋 I'm TaxBot, your AI tax assistant. I'm here to help you with tax filing, GST queries, business registration, and much more. What would you like to know about taxes today?";
-          const aiMsg: LocalMessage = {
-            id: `ai-${Date.now()}-${Math.random()}`,
-            senderId: 'ai-chatbot',
-            receiverId: currentUser.id,
-            content: welcomeMessage,
-            timestamp: Date.now()
-          };
-          setLocalMessages(prev => [...prev, aiMsg]);
-          try {
-            await trySend(currentUser.id, welcomeMessage, 'ai-chatbot');
-            setRefreshKey(k => k + 1);
-          } catch (err) {
-            console.error('persist AI welcome failed:', err);
-          }
-        }, 500);
-      }
-    } else if (selectedContact) {
-      // For CAs show starter suggestions
-      if (selectedContact.userType === 'ca') {
-        const caBaseSuggestions = [
-          selectedContact.specialization ? `Tell me about your experience with ${selectedContact.specialization}` : 'Tell me about your expertise',
-          'What documents do you need for tax filing?',
-          'How do you charge for consultations?',
-          'Can you help with GST registration?'
-        ];
-        setSuggestions(caBaseSuggestions);
-        setShowSuggestions(true);
-      } else {
-        setShowSuggestions(false);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedContactId, currentUser?.id]);
-
-  const makeUserLocalMessage = (content: string): LocalMessage => ({
-    id: `local-${Date.now()}-${Math.random()}`,
-    senderId: currentUser!.id,
-    receiverId: selectedContactId!,
-    content,
-    timestamp: Date.now()
-  });
-
-  const debugLog = (...args: any[]) => console.debug('[MessagingInterface debug]', ...args);
-
-  const sendUserMessageTo = async (receiverId: string, userMessage: string) => {
-    debugLog('sendUserMessageTo', { receiverId, userMessage, currentUserId: currentUser?.id });
-    const localMsg: LocalMessage = {
-      id: `local-${Date.now()}-${Math.random()}`,
-      senderId: currentUser!.id,
-      receiverId,
-      content: userMessage,
-      timestamp: Date.now()
+    const reader = new FileReader();
+    reader.onload = ev => {
+      setAttachment({ data: ev.target!.result as string, name: file.name, type: file.type });
     };
-    setLocalMessages(prev => [...prev, localMsg]);
-    try {
-      await trySend(receiverId, userMessage, currentUser!.id);
-      setRefreshKey(k => k + 1);
-    } catch (err) {
-      console.error('Failed to persist user message:', err);
-    }
+    reader.readAsDataURL(file);
+    // Reset input so same file can be selected again
+    e.target.value = '';
   };
 
-  const handleSendMessage = async () => {
-    if (!messageText.trim() || !selectedContactId || !currentUser) return;
-    const userMessage = messageText.trim();
+  const sendBotMessage = useCallback(
+    async (text: string) => {
+      if (!taxbotConvId || !currentUser) return;
+
+      const userMsg: TaxbotMessage = {
+        id: `local-${Date.now()}`,
+        conversationId: taxbotConvId,
+        role: 'user',
+        content: text,
+        createdAt: new Date().toISOString(),
+      };
+      setTaxbotMessages(prev => [...prev, userMsg]);
+      setIsBotThinking(true);
+      setStreamingContent('');
+
+      try {
+        const response = await apiFetch<Response>(
+          `/taxbot/conversations/${taxbotConvId}/messages`,
+          { method: 'POST', body: JSON.stringify({ content: text }) }
+        );
+
+        const reader = response.body?.getReader();
+        if (!reader) return;
+
+        const decoder = new TextDecoder();
+        let fullContent = '';
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          for (const line of chunk.split('\n')) {
+            if (!line.startsWith('data: ')) continue;
+            const jsonStr = line.slice(6).trim();
+            if (!jsonStr) continue;
+            try {
+              const parsed = JSON.parse(jsonStr) as { token?: string; done?: boolean };
+              if (parsed.done) break;
+              if (parsed.token) {
+                fullContent += parsed.token;
+                setStreamingContent(fullContent);
+              }
+            } catch {
+              // ignore malformed SSE frames
+            }
+          }
+        }
+
+        const assistantMsg: TaxbotMessage = {
+          id: `ai-${Date.now()}`,
+          conversationId: taxbotConvId,
+          role: 'assistant',
+          content: fullContent,
+          createdAt: new Date().toISOString(),
+        };
+        setTaxbotMessages(prev => [...prev, assistantMsg]);
+      } catch {
+        // error is non-critical — the user's message is already shown
+      } finally {
+        setStreamingContent('');
+        setIsBotThinking(false);
+      }
+    },
+    [taxbotConvId, currentUser]
+  );
+
+  const handleSend = async () => {
+    const text = messageText.trim();
+    if (!text || !selectedContactId || !currentUser) return;
+
     setMessageText('');
-    setShowSuggestions(false);
+    const currentAttachment = attachment;
+    setAttachment(null);
 
-    await sendUserMessageTo(selectedContactId, userMessage);
-
-    if (selectedContactId === 'ai-chatbot') {
-      setIsTyping(true);
-      setTimeout(async () => {
-        try {
-          const aiResponse = getTaxBotResponse(userMessage, currentUser!.id);
-          debugLog('AI generated response', aiResponse);
-          const aiLocal: LocalMessage = {
-            id: `ai-${Date.now()}-${Math.random()}`,
-            senderId: 'ai-chatbot',
-            receiverId: currentUser!.id,
-            content: aiResponse,
-            timestamp: Date.now()
-          };
-          setLocalMessages(prev => [...prev, aiLocal]);
-          try {
-            await trySend(currentUser!.id, aiResponse, 'ai-chatbot');
-            setRefreshKey(k => k + 1);
-          } catch (err) {
-            console.error('Failed to persist AI response:', err);
-          }
-          const followUp = getFollowUpSuggestions(userMessage);
-          setSuggestions(followUp);
-          setShowSuggestions(true);
-        } catch (err) {
-          console.error('AI generation error:', err);
-        } finally {
-          setIsTyping(false);
-        }
-      }, 800);
-    }
-  };
-
-  const handleSuggestionClick = async (suggestion: string, receiverId: string) => {
-    if (!currentUser || !receiverId) return;
-    debugLog('handleSuggestionClick', { suggestion, receiverId });
-    await sendUserMessageTo(receiverId, suggestion);
-
-    if (receiverId === 'ai-chatbot') {
-      setIsTyping(true);
-      setTimeout(async () => {
-        try {
-          const aiResponse = getTaxBotResponse(suggestion, currentUser!.id);
-          debugLog('AI response for suggestion', aiResponse);
-          const aiLocal: LocalMessage = {
-            id: `ai-${Date.now()}-${Math.random()}`,
-            senderId: 'ai-chatbot',
-            receiverId: currentUser!.id,
-            content: aiResponse,
-            timestamp: Date.now()
-          };
-          setLocalMessages(prev => [...prev, aiLocal]);
-          try {
-            await trySend(currentUser!.id, aiResponse, 'ai-chatbot');
-            setRefreshKey(k => k + 1);
-          } catch (err) {
-            console.error('Failed to persist AI suggestion response:', err);
-          }
-          const followUp = getFollowUpSuggestions(suggestion);
-          setSuggestions(followUp);
-          setShowSuggestions(true);
-        } catch (err) {
-          console.error('AI suggestion handling error:', err);
-        } finally {
-          setIsTyping(false);
-        }
-      }, 800);
+    if (isBot) {
+      await sendBotMessage(text);
     } else {
-      // human CA: keep suggestions visible by default
+      await sendMessage(selectedContactId, text, currentAttachment ?? undefined);
     }
   };
 
-  const handleKeyPress = (e: KeyboardEvent<HTMLInputElement>) => {
-    if ((e as KeyboardEvent).key === 'Enter' && !((e as KeyboardEvent).shiftKey)) {
+  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      void handleSendMessage();
+      void handleSend();
     }
   };
+
+  const isSendDisabled =
+    !messageText.trim() ||
+    isBotThinking ||
+    (isBot && (taxbotLoading || !taxbotConvId));
 
   return (
     <div className="flex h-screen bg-gray-50">
       {/* Sidebar */}
-      <div className="w-1/3 bg-white border-r border-gray-200 flex flex-col">
+      <div className="w-72 bg-white border-r border-gray-200 flex flex-col shrink-0">
         <div className="p-4 border-b border-gray-200">
-          <button onClick={onBack} className="flex items-center space-x-2 text-blue-600 hover:text-blue-800 mb-4">
+          <button
+            onClick={onBack}
+            className="flex items-center gap-2 text-blue-600 hover:text-blue-800 mb-3 text-sm font-medium"
+          >
             <ArrowLeft className="h-4 w-4" />
-            <span>Back to Profiles</span>
+            Back to Profiles
           </button>
           <h2 className="text-lg font-semibold text-gray-900">Messages</h2>
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          {availableContacts.map(contact => {
-            const chat = currentUser ? getChatForUsers(currentUser.id, contact.id) : undefined;
-            const unreadCount = currentUser ? getUnreadCount(currentUser.id, contact.id) : 0;
+          {sidebarContacts.map(contact => {
             const isSelected = selectedContactId === contact.id;
-
             return (
               <button
                 key={contact.id}
                 onClick={() => setSelectedContactId(contact.id)}
-                className={`w-full p-4 text-left border-b border-gray-100 hover:bg-gray-50 transition-colors duration-200 ${isSelected ? 'bg-blue-50 border-blue-200' : ''}`}
+                className={`w-full p-4 text-left border-b border-gray-100 hover:bg-gray-50 transition-colors ${
+                  isSelected ? 'bg-blue-50 border-l-4 border-l-blue-600' : 'border-l-4 border-l-transparent'
+                }`}
               >
-                <div className="flex items-center space-x-3">
-                  <div className="relative">
-                    <img className="h-12 w-12 rounded-full" src={contact.profileImage} alt={contact.name} />
-                    {contact.id === 'ai-chatbot' && (
-                      <div className="absolute -bottom-1 -right-1 bg-green-500 rounded-full p-1">
+                <div className="flex items-center gap-3">
+                  <div className="relative shrink-0">
+                    <img
+                      src={avatarSrc(contact.fullName, contact.profileImage)}
+                      alt={contact.fullName}
+                      className="h-10 w-10 rounded-full object-cover"
+                    />
+                    {contact.isBot && (
+                      <span className="absolute -bottom-0.5 -right-0.5 bg-green-500 rounded-full p-0.5">
                         <Bot className="h-3 w-3 text-white" />
-                      </div>
+                      </span>
                     )}
-                    {unreadCount > 0 && (
-                      <div className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
-                        {unreadCount > 9 ? '9+' : unreadCount}
-                      </div>
+                    {(contact.unreadCount ?? 0) > 0 && (
+                      <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center font-medium">
+                        {(contact.unreadCount ?? 0) > 9 ? '9+' : contact.unreadCount}
+                      </span>
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium text-gray-900 truncate">{contact.name}</div>
-                    <div className={`text-sm truncate ${unreadCount > 0 ? 'text-gray-900 font-medium' : 'text-gray-500'}`}>
-                      {contact.id === 'ai-chatbot' ? 'AI Assistant for tax queries' : chat?.lastMessage ? chat.lastMessage.content : 'Start a conversation'}
-                    </div>
-                    {chat?.lastMessage && (
-                      <div className="text-xs text-gray-400 mt-1">
-                        {new Date(chat.lastMessage.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </div>
-                    )}
+                    <p className="text-sm font-medium text-gray-900 truncate">{contact.fullName}</p>
+                    <p className="text-xs text-gray-500 truncate">
+                      {contact.isBot ? 'AI tax advisor · Groq powered' : (contact.lastContent ?? 'Start a conversation')}
+                    </p>
                   </div>
                 </div>
               </button>
@@ -380,81 +331,198 @@ export function MessagingInterface({ users, onBack, initialContactId }: Messagin
       </div>
 
       {/* Chat area */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col min-w-0">
         {selectedContact ? (
           <>
-            <div className="p-4 border-b border-gray-200 bg-white">
-              <div className="flex items-center space-x-3">
-                <img className="h-10 w-10 rounded-full" src={selectedContact.profileImage} alt={selectedContact.name} />
-                <div>
-                  <h3 className="text-lg font-semibold text-gray-900">{selectedContact.name}</h3>
-                  <p className="text-sm text-gray-500">{selectedContact.id === 'ai-chatbot' ? 'AI Assistant' : selectedContact.phone}</p>
-                </div>
+            {/* Header */}
+            <div className="px-5 py-3 border-b border-gray-200 bg-white flex items-center gap-3 shadow-sm">
+              <img
+                src={avatarSrc(selectedContact.fullName, selectedContact.profileImage)}
+                alt={selectedContact.fullName}
+                className="h-9 w-9 rounded-full object-cover"
+              />
+              <div>
+                <h3 className="font-semibold text-gray-900 text-sm">{selectedContact.fullName}</h3>
+                <p className="text-xs text-gray-500">
+                  {selectedContact.isBot
+                    ? 'Powered by Groq AI · llama-3.3-70b-versatile'
+                    : selectedContact.role === 'ca'
+                    ? 'Chartered Accountant'
+                    : 'Client'}
+                </p>
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 space-y-4">
-              {localMessages.length === 0 ? (
-                <div className="text-center text-gray-500 mt-8"><p>Start a conversation with {selectedContact.name}</p></div>
-              ) : (
-                localMessages.map(message => {
-                  const isOwn = message.senderId === currentUser?.id;
-                  const otherId = message.senderId === currentUser?.id ? message.receiverId : message.senderId;
-                  if (otherId !== selectedContactId && message.receiverId !== selectedContactId && message.senderId !== selectedContactId) {
-                    return null;
-                  }
-                  return (
-                    <div key={message.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
-                      <div className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${isOwn ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-900'}`}>
-                        <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                        <p className={`text-xs mt-1 ${isOwn ? 'text-blue-100' : 'text-gray-500'}`}>{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</p>
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3">
+              {isBot ? (
+                <>
+                  {taxbotLoading && (
+                    <div className="text-center text-gray-400 text-sm mt-8">Loading conversation...</div>
+                  )}
+                  {!taxbotLoading && taxbotMessages.length === 0 && !isBotThinking && (
+                    <div className="text-center mt-12">
+                      <Bot className="h-10 w-10 mx-auto text-blue-300 mb-3" />
+                      <p className="text-gray-500 text-sm font-medium">Ask TaxBot anything about</p>
+                      <p className="text-gray-400 text-sm">Indian income tax, GST, corporate law, or financial planning.</p>
+                    </div>
+                  )}
+                  {taxbotMessages.map(msg => (
+                    <div
+                      key={msg.id}
+                      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div
+                        className={`max-w-[72%] px-4 py-2.5 rounded-2xl text-sm whitespace-pre-wrap leading-relaxed ${
+                          msg.role === 'user'
+                            ? 'bg-blue-600 text-white rounded-br-sm'
+                            : 'bg-gray-100 text-gray-900 rounded-bl-sm'
+                        }`}
+                      >
+                        {msg.content}
+                        <div className={`text-xs mt-1.5 ${msg.role === 'user' ? 'text-blue-200' : 'text-gray-400'}`}>
+                          {formatTime(msg.createdAt)}
+                        </div>
                       </div>
                     </div>
-                  );
-                })
+                  ))}
+                  {streamingContent && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[72%] px-4 py-2.5 rounded-2xl rounded-bl-sm text-sm bg-gray-100 text-gray-900 whitespace-pre-wrap leading-relaxed">
+                        {streamingContent}
+                        <span className="inline-block w-0.5 h-4 bg-gray-500 ml-0.5 animate-pulse align-middle" />
+                      </div>
+                    </div>
+                  )}
+                  {isBotThinking && !streamingContent && (
+                    <div className="flex justify-start">
+                      <div className="bg-gray-100 px-4 py-3 rounded-2xl rounded-bl-sm">
+                        <span className="flex gap-1.5 items-center">
+                          {[0, 0.15, 0.3].map(delay => (
+                            <span
+                              key={delay}
+                              className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"
+                              style={{ animationDelay: `${delay}s` }}
+                            />
+                          ))}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {messages.length === 0 && (
+                    <div className="text-center text-gray-400 text-sm mt-12">
+                      No messages yet. Say hello!
+                    </div>
+                  )}
+                  {messages.map(msg => {
+                    const isOwn = msg.senderId === currentUser?.id;
+                    return (
+                      <div key={msg.id} className={`flex ${isOwn ? 'justify-end' : 'justify-start'}`}>
+                        <div
+                          className={`max-w-[70%] px-4 py-2.5 rounded-2xl text-sm ${
+                            isOwn
+                              ? 'bg-blue-600 text-white rounded-br-sm'
+                              : 'bg-gray-100 text-gray-900 rounded-bl-sm'
+                          }`}
+                        >
+                          <p className="whitespace-pre-wrap leading-relaxed">{msg.content}</p>
+                          {msg.attachmentName && (
+                            <div
+                              className={`mt-2 text-xs flex items-center gap-1 ${
+                                isOwn ? 'text-blue-200' : 'text-gray-500'
+                              }`}
+                            >
+                              <Paperclip className="h-3 w-3 shrink-0" />
+                              <span className="truncate">{msg.attachmentName}</span>
+                            </div>
+                          )}
+                          <div className={`text-xs mt-1.5 ${isOwn ? 'text-blue-200' : 'text-gray-400'}`}>
+                            {formatTime(msg.createdAt)}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
               )}
-
-              {isTyping && (
-                <div className="flex justify-start">
-                  <div className="bg-gray-200 text-gray-900 max-w-xs lg:max-w-md px-4 py-2 rounded-lg">
-                    <p className="text-sm"><span className="inline-flex space-x-1"><span className="animate-bounce">.</span><span className="animate-bounce" style={{ animationDelay: '0.1s' }}>.</span><span className="animate-bounce" style={{ animationDelay: '0.2s' }}>.</span></span></p>
-                  </div>
-                </div>
-              )}
-
               <div ref={messagesEndRef} />
             </div>
 
-            {selectedContact && (selectedContact.id === 'ai-chatbot' || selectedContact.userType === 'ca') && showSuggestions && suggestions.length > 0 && (
-              <div className="px-4 py-2 bg-blue-50 border-t border-blue-100">
-                <div className="flex items-center space-x-2 mb-2">
-                  <Lightbulb className="h-4 w-4 text-blue-600" />
-                  <span className="text-sm font-medium text-blue-800">Suggested questions:</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {suggestions.map((suggestion, index) => (
-                    <button key={index} onClick={() => handleSuggestionClick(suggestion, selectedContact.id)} className="text-xs bg-white text-blue-700 px-3 py-1 rounded-full border border-blue-200 hover:bg-blue-100 transition-colors duration-200">
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
+            {/* Attachment preview bar */}
+            {attachment && (
+              <div className="px-4 py-2 bg-blue-50 border-t border-blue-100 flex items-center gap-2 text-sm text-blue-800">
+                <Paperclip className="h-4 w-4 shrink-0" />
+                <span className="truncate flex-1">{attachment.name}</span>
+                <button
+                  onClick={() => setAttachment(null)}
+                  className="shrink-0 hover:text-red-500 transition-colors"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+            {attachmentError && (
+              <div className="px-4 py-2 bg-red-50 text-red-600 text-xs border-t border-red-100">
+                {attachmentError}
               </div>
             )}
 
+            {/* Input bar */}
             <div className="p-4 border-t border-gray-200 bg-white">
-              <div className="flex space-x-2">
-                <input type="text" value={messageText} onChange={(e) => setMessageText(e.target.value)} onKeyPress={handleKeyPress} placeholder={`Message ${selectedContact.name}...`} className="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
-                <button onClick={() => void handleSendMessage()} disabled={!messageText.trim()} className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white p-2 rounded-lg transition-colors duration-200">
+              <div className="flex items-center gap-2">
+                {!isBot && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".pdf,.jpg,.jpeg,.png,.docx,.xlsx"
+                      onChange={handleFileSelect}
+                      className="hidden"
+                    />
+                    <button
+                      onClick={() => {
+                        setAttachmentError(null);
+                        fileInputRef.current?.click();
+                      }}
+                      title="Attach file"
+                      className="text-gray-400 hover:text-blue-600 transition-colors p-1 shrink-0"
+                    >
+                      <Paperclip className="h-5 w-5" />
+                    </button>
+                  </>
+                )}
+                <input
+                  type="text"
+                  value={messageText}
+                  onChange={e => setMessageText(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={
+                    isBot
+                      ? 'Ask about Indian taxes, GST, or financial planning...'
+                      : `Message ${selectedContact.fullName}...`
+                  }
+                  disabled={isBotThinking || taxbotLoading}
+                  className="flex-1 border border-gray-300 rounded-lg px-4 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-400"
+                />
+                <button
+                  onClick={() => void handleSend()}
+                  disabled={isSendDisabled}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white p-2 rounded-lg transition-colors shrink-0"
+                >
                   <Send className="h-5 w-5" />
                 </button>
               </div>
             </div>
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-gray-500">
-            <div className="text-center">
-              <p className="text-lg">Select a contact to start messaging</p>
-              <p className="text-sm mt-2">Choose from the list on the left</p>
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center text-gray-400">
+              <Bot className="h-12 w-12 mx-auto mb-3 text-gray-200" />
+              <p className="text-base font-medium">Select a contact to start messaging</p>
+              <p className="text-sm mt-1">Choose TaxBot or a user from the left panel</p>
             </div>
           </div>
         )}

@@ -1,11 +1,26 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import type { User } from '../types';
+import type { User, ApiResponse } from '../types';
+import { api } from '../services/api';
+
+const TOKEN_KEY = 'taxtalk_token';
+
+interface SignupData {
+  name: string;
+  email: string;
+  phone?: string;
+  password: string;
+  userType: 'user' | 'ca';
+  workExperience?: number;
+  specialization?: string[];
+  caNumber?: string;
+}
 
 interface AuthContextType {
   currentUser: User | null;
   login: (email: string, password: string) => Promise<User>;
-  signup: (userData: Partial<User> & { password: string }) => Promise<User>;
+  signup: (userData: SignupData & { [key: string]: unknown }) => Promise<User>;
   logout: () => void;
+  updateCurrentUser: (user: User) => void;
   isLoading: boolean;
 }
 
@@ -24,63 +39,65 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const savedUser = localStorage.getItem('currentUser');
-    if (savedUser) {
-      try {
-        setCurrentUser(JSON.parse(savedUser));
-      } catch (err) {
-        console.warn('Failed to parse saved currentUser', err);
-        localStorage.removeItem('currentUser');
-      }
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) {
+      setIsLoading(false);
+      return;
     }
-    setIsLoading(false);
+
+    api
+      .get<ApiResponse<User>>('/auth/me')
+      .then(res => {
+        if (res.success) setCurrentUser(res.data);
+      })
+      .catch(() => {
+        localStorage.removeItem(TOKEN_KEY);
+      })
+      .finally(() => setIsLoading(false));
   }, []);
 
   const login = async (email: string, password: string): Promise<User> => {
-    const users = JSON.parse(localStorage.getItem('users') || '[]');
-    const user = users.find((u: any) => u.email === email && u.password === password);
-    if (!user) {
-      throw new Error('Invalid email or password');
-    }
-    const { password: _pw, ...userWithoutPassword } = user;
-    setCurrentUser(userWithoutPassword);
-    localStorage.setItem('currentUser', JSON.stringify(userWithoutPassword));
-    return userWithoutPassword;
+    const res = await api.post<ApiResponse<{ token: string; user: User }>>(
+      '/auth/login',
+      { email, password },
+      { skipAuth: true }
+    );
+    localStorage.setItem(TOKEN_KEY, res.data.token);
+    setCurrentUser(res.data.user);
+    return res.data.user;
   };
 
-  const signup = async (userData: Partial<User> & { password: string }): Promise<User> => {
-    const users = JSON.parse(localStorage.getItem('users') || '[]');
-    if (users.find((u: any) => u.email === userData.email)) {
-      throw new Error('User already exists');
-    }
-
-    const newUserWithPassword = {
-      id: Date.now().toString(),
-      name: userData.name || '',
-      email: userData.email || '',
-      phone: userData.phone || '',
+  const signup = async (userData: SignupData & { [key: string]: unknown }): Promise<User> => {
+    const role = userData.userType === 'ca' ? 'ca' : 'client';
+    const payload = {
+      email: userData.email,
       password: userData.password,
-      profileImage: `https://api.dicebear.com/7.x/avataaars/svg?seed=${userData.name || Date.now()}`,
-      userType: userData.userType || 'user',
-      workExperience: userData.workExperience,
-      specialization: userData.specialization,
-      rating: userData.userType === 'ca' ? Math.floor(Math.random() * 2) + 4 : undefined,
+      fullName: userData.name,
+      phone: userData.phone,
+      role,
       caNumber: userData.caNumber,
-      isVerified: userData.userType === 'ca' ? true : undefined,
+      workExperience: userData.workExperience,
+      specializations: userData.specialization,
     };
 
-    users.push(newUserWithPassword);
-    localStorage.setItem('users', JSON.stringify(users));
-
-    const { password: _pw, ...newUser } = newUserWithPassword;
-    setCurrentUser(newUser);
-    localStorage.setItem('currentUser', JSON.stringify(newUser));
-    return newUser;
+    const res = await api.post<ApiResponse<{ token: string; user: User }>>(
+      '/auth/signup',
+      payload,
+      { skipAuth: true }
+    );
+    localStorage.setItem(TOKEN_KEY, res.data.token);
+    setCurrentUser(res.data.user);
+    return res.data.user;
   };
 
   const logout = () => {
+    api.post('/auth/logout', {}).catch(() => null);
+    localStorage.removeItem(TOKEN_KEY);
     setCurrentUser(null);
-    localStorage.removeItem('currentUser');
+  };
+
+  const updateCurrentUser = (user: User) => {
+    setCurrentUser(user);
   };
 
   const value: AuthContextType = {
@@ -88,6 +105,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     login,
     signup,
     logout,
+    updateCurrentUser,
     isLoading,
   };
 

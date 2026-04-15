@@ -1,117 +1,132 @@
-import { useState, useEffect } from 'react';
-import { Message, Chat } from '../types';
+import { useState, useCallback, useEffect, useRef } from 'react';
+import type { Message, Chat, ApiResponse } from '../types';
+import { api } from '../services/api';
 
-export function useChat() {
+const POLL_INTERVAL_MS = Number(import.meta.env.VITE_POLLING_INTERVAL_MS ?? 30_000);
+
+export function useChat(currentUserId: string | undefined, otherUserId?: string) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [chats, setChats] = useState<Chat[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
-    const savedMessages = localStorage.getItem('messages');
-    const savedChats = localStorage.getItem('chats');
-    
-    if (savedMessages) {
-      const parsedMessages = JSON.parse(savedMessages);
-      // Convert timestamp strings back to Date objects
-      const messagesWithDates = parsedMessages.map((msg: any) => ({
-        ...msg,
-        timestamp: new Date(msg.timestamp)
-      }));
-      setMessages(messagesWithDates);
+  const fetchChats = useCallback(async () => {
+    if (!currentUserId) return;
+    try {
+      const res = await api.get<ApiResponse<Chat[]>>('/chats');
+      setChats(res.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load chats');
     }
-    
-    if (savedChats) {
-      const parsedChats = JSON.parse(savedChats);
-      // Convert timestamp strings back to Date objects
-      const chatsWithDates = parsedChats.map((chat: any) => ({
-        ...chat,
-        lastActivity: new Date(chat.lastActivity),
-        lastMessage: chat.lastMessage ? {
-          ...chat.lastMessage,
-          timestamp: new Date(chat.lastMessage.timestamp)
-        } : undefined
-      }));
-      setChats(chatsWithDates);
+  }, [currentUserId]);
+
+  const fetchMessages = useCallback(async (targetUserId: string) => {
+    if (!currentUserId) return;
+    setIsLoading(true);
+    try {
+      const res = await api.get<ApiResponse<Message[]>>(`/messages/with/${targetUserId}`);
+      setMessages(res.data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load messages');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentUserId]);
+
+  // Poll for new messages when in a conversation
+  useEffect(() => {
+    if (!currentUserId || !otherUserId) return;
+
+    fetchMessages(otherUserId);
+    fetchChats();
+
+    pollRef.current = setInterval(() => {
+      fetchMessages(otherUserId);
+      fetchChats();
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [currentUserId, otherUserId, fetchMessages, fetchChats]);
+
+  // Poll chats list when no active conversation
+  useEffect(() => {
+    if (!currentUserId || otherUserId) return;
+
+    fetchChats();
+
+    pollRef.current = setInterval(fetchChats, POLL_INTERVAL_MS);
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [currentUserId, otherUserId, fetchChats]);
+
+  const sendMessage = useCallback(async (
+    receiverId: string,
+    content: string,
+    attachment?: { data: string; name: string; type: string }
+  ): Promise<Message | null> => {
+    try {
+      const res = await api.post<ApiResponse<Message>>('/messages', {
+        receiverId,
+        content,
+        attachmentData: attachment?.data ?? null,
+        attachmentName: attachment?.name ?? null,
+        attachmentType: attachment?.type ?? null,
+      });
+
+      const newMessage = res.data;
+      setMessages(prev => [...prev, newMessage]);
+      await fetchChats();
+      return newMessage;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to send message');
+      return null;
+    }
+  }, [fetchChats]);
+
+  const markAsRead = useCallback(async (messageId: string) => {
+    try {
+      await api.put(`/messages/${messageId}/read`, {});
+      setMessages(prev =>
+        prev.map(m => m.id === messageId ? { ...m, isRead: true } : m)
+      );
+    } catch {
+      // non-critical
     }
   }, []);
 
-  const sendMessage = (receiverId: string, content: string, senderId: string) => {
-    const newMessage: Message = {
-      id: Date.now().toString(),
-      senderId,
-      receiverId,
-      content,
-      timestamp: new Date(),
-      read: false,
-    };
-
-    const updatedMessages = [...messages, newMessage];
-    setMessages(updatedMessages);
-    localStorage.setItem('messages', JSON.stringify(updatedMessages));
-
-    // Update or create chat
-    const existingChatIndex = chats.findIndex(chat => 
-      chat.participants.includes(senderId) && chat.participants.includes(receiverId)
-    );
-
-    if (existingChatIndex >= 0) {
-      const updatedChats = [...chats];
-      updatedChats[existingChatIndex].lastMessage = newMessage;
-      updatedChats[existingChatIndex].lastActivity = new Date();
-      setChats(updatedChats);
-      localStorage.setItem('chats', JSON.stringify(updatedChats));
-    } else {
-      const newChat: Chat = {
-        id: Date.now().toString(),
-        participants: [senderId, receiverId],
-        lastMessage: newMessage,
-        lastActivity: new Date(),
-      };
-      
-      const updatedChats = [...chats, newChat];
-      setChats(updatedChats);
-      localStorage.setItem('chats', JSON.stringify(updatedChats));
+  const deleteChat = useCallback(async (chatId: string) => {
+    try {
+      await api.delete(`/chats/${chatId}`);
+      setChats(prev => prev.filter(c => c.id !== chatId));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete chat');
     }
-  };
+  }, []);
 
-  const getMessagesForChat = (userId1: string, userId2: string): Message[] => {
-    return messages.filter(message => 
-      (message.senderId === userId1 && message.receiverId === userId2) ||
-      (message.senderId === userId2 && message.receiverId === userId1)
-    ).sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-  };
+  const getMessagesForChat = useCallback(
+    (userId1: string, userId2: string): Message[] =>
+      messages.filter(
+        m =>
+          (m.senderId === userId1 && m.receiverId === userId2) ||
+          (m.senderId === userId2 && m.receiverId === userId1)
+      ),
+    [messages]
+  );
 
-  const getChatForUsers = (userId1: string, userId2: string): Chat | undefined => {
-    return chats.find(chat => 
-      chat.participants.includes(userId1) && chat.participants.includes(userId2)
-    );
-  };
-
-  const getUnreadCount = (currentUserId: string, contactId: string): number => {
-    return messages.filter(message => 
-      message.senderId === contactId && 
-      message.receiverId === currentUserId && 
-      !message.read
-    ).length;
-  };
-
-  const markMessagesAsRead = (currentUserId: string, contactId: string) => {
-    const updatedMessages = messages.map(message => {
-      if (message.senderId === contactId && message.receiverId === currentUserId && !message.read) {
-        return { ...message, read: true };
-      }
-      return message;
-    });
-    
-    setMessages(updatedMessages);
-    localStorage.setItem('messages', JSON.stringify(updatedMessages));
-  };
   return {
     messages,
     chats,
+    isLoading,
+    error,
+    fetchChats,
+    fetchMessages,
     sendMessage,
+    markAsRead,
+    deleteChat,
     getMessagesForChat,
-    getChatForUsers,
-    getUnreadCount,
-    markMessagesAsRead,
   };
 }

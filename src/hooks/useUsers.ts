@@ -1,87 +1,69 @@
-import { useState, useEffect } from 'react';
-import { User } from '../types';
+import { useState, useCallback } from 'react';
+import type { User, ApiResponse } from '../types';
+import { api } from '../services/api';
+
+export interface UserSearchFilters {
+  q?: string;
+  specialization?: string;
+  minRating?: number;
+  minExperience?: number;
+  page?: number;
+  limit?: number;
+}
+
+interface SearchResult {
+  users: User[];
+  total: number;
+  page: number;
+  limit: number;
+}
 
 export function useUsers() {
   const [users, setUsers] = useState<User[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [meta, setMeta] = useState<{ total: number; page: number; limit: number } | null>(null);
 
-  useEffect(() => {
-    // Initialize with some mock data if none exists
-    const savedUsers = localStorage.getItem('users');
-    if (!savedUsers || JSON.parse(savedUsers).length === 0) {
-      const mockUsers: (User & { password: string })[] = [
-        {
-          id: '1',
-          name: 'Rajesh Kumar',
-          email: 'rajesh.kumar@ca.com',
-          password: 'ca123456',
-          phone: '+91 98765 43210',
-          profileImage: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Rajesh',
-          userType: 'ca',
-          workExperience: 8,
-          specialization: ['GST', 'Income Tax', 'Corporate Law'],
-          rating: 4.8,
-          caNumber: 'CA123456',
-          isVerified: true,
-        },
-        {
-          id: '2',
-          name: 'Priya Sharma',
-          email: 'priya.sharma@ca.com',
-          password: 'ca789012',
-          phone: '+91 98765 43211',
-          profileImage: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Priya',
-          userType: 'ca',
-          workExperience: 12,
-          specialization: ['Auditing', 'Taxation', 'Financial Planning'],
-          rating: 4.9,
-          caNumber: 'CA789012',
-          isVerified: true,
-        },
-        {
-          id: '3',
-          name: 'Amit Patel',
-          email: 'amit.patel@email.com',
-          password: 'user123456',
-          phone: '+91 98765 43212',
-          profileImage: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Amit',
-          userType: 'user',
-        },
-        {
-          id: '4',
-          name: 'Sneha Gupta',
-          email: 'sneha.gupta@ca.com',
-          password: 'ca345678',
-          phone: '+91 98765 43213',
-          profileImage: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sneha',
-          userType: 'ca',
-          workExperience: 6,
-          specialization: ['GST', 'TDS', 'Company Law'],
-          rating: 4.7,
-          caNumber: 'CA345678',
-          isVerified: true,
-        },
-        {
-          id: '5',
-          name: 'Vikash Singh',
-          email: 'vikash.singh@email.com',
-          password: 'user789012',
-          phone: '+91 98765 43214',
-          profileImage: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Vikash',
-          userType: 'user',
-        },
-      ];
-      
-      console.log('Initializing users with passwords:', mockUsers.map(u => ({ email: u.email, password: u.password })));
-      localStorage.setItem('users', JSON.stringify(mockUsers));
-      setUsers(mockUsers.map(({ password, ...user }) => user));
-    } else {
-      const parsedUsers = JSON.parse(savedUsers);
-      setUsers(parsedUsers.map((user: any) => {
-        const { password, ...userWithoutPassword } = user;
-        return userWithoutPassword;
-      }));
+  const searchUsers = useCallback(async (filters: UserSearchFilters = {}): Promise<SearchResult> => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const params = new URLSearchParams();
+      if (filters.q) params.set('q', filters.q);
+      if (filters.specialization) params.set('specialization', filters.specialization);
+      if (filters.minRating != null) params.set('minRating', String(filters.minRating));
+      if (filters.minExperience != null) params.set('minExperience', String(filters.minExperience));
+      if (filters.page != null) params.set('page', String(filters.page));
+      if (filters.limit != null) params.set('limit', String(filters.limit));
+
+      const qs = params.toString();
+      const res = await api.get<ApiResponse<User[]>>(`/users/search${qs ? `?${qs}` : ''}`);
+
+      const newUsers = res.data;
+      const newMeta = res.meta ?? { total: newUsers.length, page: 1, limit: 20 };
+
+      setUsers(newUsers);
+      setMeta(newMeta);
+
+      return { users: newUsers, ...newMeta };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to load users';
+      setError(msg);
+      return { users: [], total: 0, page: 1, limit: 20 };
+    } finally {
+      setIsLoading(false);
     }
   }, []);
 
-  return { users };
+  const getUserById = useCallback(async (id: string): Promise<User | null> => {
+    try {
+      const res = await api.get<ApiResponse<User>>(`/users/${id}`);
+      return res.data;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  return { users, isLoading, error, meta, searchUsers, getUserById };
 }
