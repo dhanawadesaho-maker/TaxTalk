@@ -34,8 +34,11 @@ export async function apiFetch<T>(
   if (!response.ok) {
     let errorMessage = `Request failed with status ${response.status}`;
     try {
-      const errorBody = await response.json();
-      errorMessage = errorBody?.error ?? errorBody?.message ?? errorMessage;
+      const errorBody = await response.text();
+      if (errorBody) {
+        const parsedError = JSON.parse(errorBody);
+        errorMessage = parsedError?.error ?? parsedError?.message ?? errorMessage;
+      }
     } catch {
       // ignore parse errors
     }
@@ -47,9 +50,13 @@ export async function apiFetch<T>(
     return response as unknown as T;
   }
 
-  const text = await response.text();
-  if (!text) {
+  if (response.status === 204) {
     return null as unknown as T;
+  }
+
+  const text = await response.text();
+  if (!text.trim()) {
+    throw new ApiError('Empty response body from server', response.status);
   }
 
   try {
