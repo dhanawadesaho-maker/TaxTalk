@@ -1,8 +1,5 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL;
-
-if (!BASE_URL) {
-  throw new Error('VITE_API_BASE_URL must be defined in .env');
-}
+const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL;
+const BASE_URL = configuredBaseUrl?.replace(/\/$/, '') ?? `${window.location.origin}/api`;
 
 function getToken(): string | null {
   return localStorage.getItem('taxtalk_token');
