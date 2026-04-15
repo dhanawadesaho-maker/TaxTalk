@@ -35,7 +35,7 @@ export async function apiFetch<T>(
     let errorMessage = `Request failed with status ${response.status}`;
     try {
       const errorBody = await response.json();
-      errorMessage = errorBody.error ?? errorMessage;
+      errorMessage = errorBody?.error ?? errorBody?.message ?? errorMessage;
     } catch {
       // ignore parse errors
     }
@@ -47,7 +47,16 @@ export async function apiFetch<T>(
     return response as unknown as T;
   }
 
-  return response.json() as Promise<T>;
+  const text = await response.text();
+  if (!text) {
+    return null as unknown as T;
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch (err) {
+    throw new ApiError('Invalid JSON response from server', response.status);
+  }
 }
 
 export class ApiError extends Error {
