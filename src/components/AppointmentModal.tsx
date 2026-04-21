@@ -10,10 +10,14 @@ interface AppointmentModalProps {
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
+function toLocalDateString(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function getDateString(daysFromNow: number): string {
   const d = new Date();
   d.setDate(d.getDate() + daysFromNow);
-  return d.toISOString().split('T')[0];
+  return toLocalDateString(d);
 }
 
 export function AppointmentModal({ ca, onClose }: AppointmentModalProps) {
@@ -55,7 +59,7 @@ export function AppointmentModal({ ca, onClose }: AppointmentModalProps) {
     const d = new Date();
     d.setDate(d.getDate() + i + 1);
     return {
-      value: d.toISOString().split('T')[0],
+      value: toLocalDateString(d),
       label: `${DAYS[d.getDay()]} ${d.getDate()}/${d.getMonth() + 1}`,
       dayOfWeek: d.getDay(),
     };

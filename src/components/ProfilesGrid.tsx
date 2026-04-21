@@ -3,6 +3,7 @@ import type { User } from '../types';
 import { ProfileCard } from './ProfileCard';
 import { SearchFilter } from './SearchFilter';
 import { AppointmentModal } from './AppointmentModal';
+import { ReviewModal } from './ReviewModal';
 import { useAuth } from '../contexts/AuthContext';
 import { useUsers, type UserSearchFilters } from '../hooks/useUsers';
 
@@ -14,6 +15,7 @@ export function ProfilesGrid({ onContact }: ProfilesGridProps) {
   const { currentUser } = useAuth();
   const { users, isLoading, error, meta, searchUsers } = useUsers();
   const [bookingTarget, setBookingTarget] = useState<User | null>(null);
+  const [reviewTarget, setReviewTarget] = useState<User | null>(null);
 
   useEffect(() => {
     searchUsers({});
@@ -62,6 +64,7 @@ export function ProfilesGrid({ onContact }: ProfilesGridProps) {
                 user={user}
                 onContact={onContact}
                 onBook={currentUser.role === 'client' ? setBookingTarget : undefined}
+                onReview={currentUser.role === 'client' ? setReviewTarget : undefined}
               />
             ))}
           </div>
@@ -72,6 +75,14 @@ export function ProfilesGrid({ onContact }: ProfilesGridProps) {
         <AppointmentModal
           ca={bookingTarget}
           onClose={() => setBookingTarget(null)}
+        />
+      )}
+
+      {reviewTarget && (
+        <ReviewModal
+          ca={reviewTarget}
+          onClose={() => setReviewTarget(null)}
+          onSubmitted={() => setReviewTarget(null)}
         />
       )}
     </div>

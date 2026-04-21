@@ -52,7 +52,7 @@ function avatarSrc(fullName: string, profileImage: string | null): string {
   );
 }
 
-export function MessagingInterface({ users, onBack, initialContactId }: MessagingInterfaceProps) {
+export function MessagingInterface({ onBack, initialContactId }: Omit<MessagingInterfaceProps, 'users'> & { users?: User[] }) {
   const { currentUser } = useAuth();
   const [selectedContactId, setSelectedContactId] = useState<string | null>(
     initialContactId ?? null
@@ -60,6 +60,7 @@ export function MessagingInterface({ users, onBack, initialContactId }: Messagin
   const [messageText, setMessageText] = useState('');
   const [attachment, setAttachment] = useState<AttachmentState | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [pendingContact, setPendingContact] = useState<SidebarContact | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -78,7 +79,25 @@ export function MessagingInterface({ users, onBack, initialContactId }: Messagin
     chatContactId
   );
 
-  // Sidebar contacts: TaxBot first, then all users
+  // When opening a chat with someone not yet in our chats list, fetch their info
+  useEffect(() => {
+    if (!initialContactId || initialContactId === TAXBOT_ID || !currentUser) return;
+    const inChats = chats.some(c => c.otherUser.id === initialContactId);
+    if (inChats) return;
+    api.get<ApiResponse<User>>(`/users/${initialContactId}`).then(res => {
+      const u = res.data;
+      setPendingContact({
+        id: u.id,
+        fullName: u.fullName,
+        profileImage: u.profileImage,
+        role: u.role,
+        unreadCount: 0,
+        lastContent: null,
+      });
+    }).catch(() => {});
+  }, [initialContactId, chats, currentUser]);
+
+  // Sidebar contacts: TaxBot first, then contacts from chats API
   const sidebarContacts = useMemo((): SidebarContact[] => {
     const taxbot: SidebarContact = {
       id: TAXBOT_ID,
@@ -88,22 +107,22 @@ export function MessagingInterface({ users, onBack, initialContactId }: Messagin
       isBot: true,
     };
 
-    const userContacts = (users ?? [])
-      .filter(u => u.id !== currentUser?.id)
-      .map(u => {
-        const chat = chats.find(c => c.otherUser.id === u.id);
-        return {
-          id: u.id,
-          fullName: u.fullName,
-          profileImage: u.profileImage,
-          role: u.role,
-          unreadCount: chat?.unreadCount ?? 0,
-          lastContent: chat?.lastContent ?? null,
-        };
-      });
+    const chatContacts: SidebarContact[] = chats.map(c => ({
+      id: c.otherUser.id,
+      fullName: c.otherUser.fullName,
+      profileImage: c.otherUser.profileImage,
+      role: c.otherUser.role,
+      unreadCount: c.unreadCount ?? 0,
+      lastContent: c.lastContent ?? null,
+    }));
 
-    return [taxbot, ...userContacts];
-  }, [users, currentUser, chats]);
+    const allContacts =
+      pendingContact && !chatContacts.some(c => c.id === pendingContact.id)
+        ? [...chatContacts, pendingContact]
+        : chatContacts;
+
+    return [taxbot, ...allContacts];
+  }, [chats, pendingContact]);
 
   const selectedContact = useMemo(
     () => sidebarContacts.find(c => c.id === selectedContactId),

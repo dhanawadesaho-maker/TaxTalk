@@ -6,9 +6,10 @@ interface ProfileCardProps {
   user: User;
   onContact: (userId: string) => void;
   onBook?: (user: User) => void;
+  onReview?: (user: User) => void;
 }
 
-export function ProfileCard({ user, onContact, onBook }: ProfileCardProps) {
+export function ProfileCard({ user, onContact, onBook, onReview }: ProfileCardProps) {
   const isCA = user.role === 'ca';
 
   const avatarSrc = user.profileImage
@@ -44,7 +45,12 @@ export function ProfileCard({ user, onContact, onBook }: ProfileCardProps) {
         {user.phone && (
           <div className="flex items-center space-x-2 text-gray-600">
             <Phone className="h-4 w-4 flex-shrink-0" />
-            <span className="text-sm">{user.phone}</span>
+            <a
+              href={`tel:${user.phone}`}
+              className="text-sm hover:underline hover:text-blue-600 transition-colors"
+            >
+              {user.phone}
+            </a>
           </div>
         )}
 
@@ -122,6 +128,16 @@ export function ProfileCard({ user, onContact, onBook }: ProfileCardProps) {
           >
             <Calendar className="h-4 w-4" />
             <span>Book</span>
+          </button>
+        )}
+
+        {isCA && onReview && (
+          <button
+            onClick={() => onReview(user)}
+            className="flex-1 bg-green-600 hover:bg-green-700 text-white py-2 px-3 rounded-md font-medium transition-colors duration-200 flex items-center justify-center space-x-1 text-sm"
+          >
+            <Star className="h-4 w-4" />
+            <span>Review</span>
           </button>
         )}
       </div>
