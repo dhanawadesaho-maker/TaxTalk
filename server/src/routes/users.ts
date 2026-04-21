@@ -73,32 +73,56 @@ router.get('/search', requireAuth, async (req: AuthRequest, res: Response, next:
 
     // Clients browse CAs; CAs browse clients
     const viewerRole = req.user!.role;
-    const targetRole = viewerRole === 'ca' ? 'client' : 'ca';
 
-    const rows = await query<UserSearchRow & { total_count: number }>`
-      SELECT
-        u.id, u.email, u.full_name, u.phone, u.role, u.bio, u.profile_image,
-        u.hourly_rate, u.ca_number, u.work_experience, u.is_verified, u.created_at,
-        COALESCE(ARRAY_AGG(DISTINCT cs.specialization) FILTER (WHERE cs.specialization IS NOT NULL), '{}') AS specializations,
-        AVG(r.rating) AS avg_rating,
-        COUNT(DISTINCT r.id) AS rating_count,
-        COUNT(*) OVER() AS total_count
-      FROM users u
-      LEFT JOIN ca_specializations cs ON cs.ca_id = u.id
-      LEFT JOIN ratings r ON r.ca_id = u.id
-      WHERE u.role = ${targetRole}
-        AND (
-          ${q} = ''
-          OR u.full_name ILIKE ${'%' + q + '%'}
-          OR u.bio ILIKE ${'%' + q + '%'}
-        )
-        AND (${targetRole} != 'ca' OR ${specialization} = '' OR cs.specialization = ${specialization})
-        AND (${targetRole} != 'ca' OR COALESCE(u.work_experience, 0) >= ${minExperience})
-      GROUP BY u.id
-      HAVING (${targetRole} != 'ca' OR ${minRating} = 0 OR AVG(r.rating) >= ${minRating})
-      ORDER BY AVG(r.rating) DESC NULLS LAST, u.created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
+    let rows: Array<UserSearchRow & { total_count: number }>;
+
+    if (viewerRole === 'client') {
+      // Clients browse CAs — full filter support (specialization, experience, rating)
+      rows = await query<UserSearchRow & { total_count: number }>`
+        SELECT
+          u.id, u.email, u.full_name, u.phone, u.role, u.bio, u.profile_image,
+          u.hourly_rate, u.ca_number, u.work_experience, u.is_verified, u.created_at,
+          COALESCE(ARRAY_AGG(DISTINCT cs.specialization) FILTER (WHERE cs.specialization IS NOT NULL), '{}') AS specializations,
+          AVG(r.rating) AS avg_rating,
+          COUNT(DISTINCT r.id) AS rating_count,
+          COUNT(*) OVER() AS total_count
+        FROM users u
+        LEFT JOIN ca_specializations cs ON cs.ca_id = u.id
+        LEFT JOIN ratings r ON r.ca_id = u.id
+        WHERE u.role = 'ca'
+          AND (
+            ${q} = ''
+            OR u.full_name ILIKE ${'%' + q + '%'}
+            OR u.bio ILIKE ${'%' + q + '%'}
+          )
+          AND (${specialization} = '' OR cs.specialization = ${specialization})
+          AND (COALESCE(u.work_experience, 0) >= ${minExperience})
+        GROUP BY u.id
+        HAVING (${minRating} = 0 OR AVG(r.rating) >= ${minRating})
+        ORDER BY AVG(r.rating) DESC NULLS LAST, u.created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    } else {
+      // CAs browse clients — no CA-specific filters
+      rows = await query<UserSearchRow & { total_count: number }>`
+        SELECT
+          u.id, u.email, u.full_name, u.phone, u.role, u.bio, u.profile_image,
+          u.hourly_rate, u.ca_number, u.work_experience, u.is_verified, u.created_at,
+          ARRAY[]::text[] AS specializations,
+          NULL AS avg_rating,
+          0 AS rating_count,
+          COUNT(*) OVER() AS total_count
+        FROM users u
+        WHERE u.role = 'client'
+          AND (
+            ${q} = ''
+            OR u.full_name ILIKE ${'%' + q + '%'}
+            OR u.bio ILIKE ${'%' + q + '%'}
+          )
+        ORDER BY u.created_at DESC
+        LIMIT ${limit} OFFSET ${offset}
+      `;
+    }
 
     const total = rows[0]?.total_count ?? 0;
 

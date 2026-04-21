@@ -9,9 +9,9 @@ import { createNotification } from '../services/notifications.js';
 const sendMessageSchema = z.object({
   receiverId: z.string().uuid('receiverId must be a valid UUID'),
   content: z.string().min(1, 'content is required'),
-  attachmentData: z.string().optional(),
-  attachmentName: z.string().optional(),
-  attachmentType: z.string().optional(),
+  attachmentData: z.string().nullish(),
+  attachmentName: z.string().nullish(),
+  attachmentType: z.string().nullish(),
 });
 
 const router = Router();
