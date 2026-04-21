@@ -95,16 +95,26 @@ router.get('/with/:userId', requireAuth, async (req: AuthRequest, res: Response,
     const limit = Math.min(100, parseInt((req.query.limit as string) ?? '50', 10));
     const before = (req.query.before as string) ?? null;
 
-    const messages = await query<MessageRow>`
-      SELECT * FROM messages
-      WHERE (
-        (sender_id = ${req.user!.id} AND receiver_id = ${userId})
-        OR (sender_id = ${userId} AND receiver_id = ${req.user!.id})
-      )
-      AND (${before} IS NULL OR created_at < ${before}::timestamptz)
-      ORDER BY created_at ASC
-      LIMIT ${limit}
-    `;
+    const messages = before
+      ? await query<MessageRow>`
+          SELECT * FROM messages
+          WHERE (
+            (sender_id = ${req.user!.id} AND receiver_id = ${userId})
+            OR (sender_id = ${userId} AND receiver_id = ${req.user!.id})
+          )
+          AND created_at < ${before}::timestamptz
+          ORDER BY created_at ASC
+          LIMIT ${limit}
+        `
+      : await query<MessageRow>`
+          SELECT * FROM messages
+          WHERE (
+            (sender_id = ${req.user!.id} AND receiver_id = ${userId})
+            OR (sender_id = ${userId} AND receiver_id = ${req.user!.id})
+          )
+          ORDER BY created_at ASC
+          LIMIT ${limit}
+        `;
 
     res.json({ success: true, data: messages.map(formatMessage) });
   } catch (err) {
