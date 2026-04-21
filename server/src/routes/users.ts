@@ -7,12 +7,12 @@ import { badRequest, forbidden, notFound } from '../utils/errors.js';
 
 const updateUserSchema = z.object({
   fullName: z.string().min(1, 'fullName must not be empty').optional(),
-  phone: z.string().optional(),
-  bio: z.string().optional(),
-  profileImage: z.string().optional(),
-  hourlyRate: z.number().nonnegative('hourlyRate must be non-negative').optional(),
-  caNumber: z.string().optional(),
-  workExperience: z.number().int().nonnegative('workExperience must be a non-negative integer').optional(),
+  phone: z.string().nullish(),
+  bio: z.string().nullish(),
+  profileImage: z.string().nullish(),
+  hourlyRate: z.number().nonnegative('hourlyRate must be non-negative').nullish(),
+  caNumber: z.string().nullish(),
+  workExperience: z.number().int().nonnegative('workExperience must be a non-negative integer').nullish(),
   specializations: z.array(z.string().min(1)).optional(),
 });
 
@@ -71,6 +71,10 @@ router.get('/search', requireAuth, async (req: AuthRequest, res: Response, next:
     const limit = Math.min(50, Math.max(1, parseInt((req.query.limit as string) ?? '20', 10)));
     const offset = (page - 1) * limit;
 
+    // Clients browse CAs; CAs browse clients
+    const viewerRole = req.user!.role;
+    const targetRole = viewerRole === 'ca' ? 'client' : 'ca';
+
     const rows = await query<UserSearchRow & { total_count: number }>`
       SELECT
         u.id, u.email, u.full_name, u.phone, u.role, u.bio, u.profile_image,
@@ -82,16 +86,16 @@ router.get('/search', requireAuth, async (req: AuthRequest, res: Response, next:
       FROM users u
       LEFT JOIN ca_specializations cs ON cs.ca_id = u.id
       LEFT JOIN ratings r ON r.ca_id = u.id
-      WHERE u.role = 'ca'
+      WHERE u.role = ${targetRole}
         AND (
           ${q} = ''
           OR u.full_name ILIKE ${'%' + q + '%'}
           OR u.bio ILIKE ${'%' + q + '%'}
         )
-        AND (${specialization} = '' OR cs.specialization = ${specialization})
-        AND COALESCE(u.work_experience, 0) >= ${minExperience}
+        AND (${targetRole} != 'ca' OR ${specialization} = '' OR cs.specialization = ${specialization})
+        AND (${targetRole} != 'ca' OR COALESCE(u.work_experience, 0) >= ${minExperience})
       GROUP BY u.id
-      HAVING ${minRating} = 0 OR AVG(r.rating) >= ${minRating}
+      HAVING (${targetRole} != 'ca' OR ${minRating} = 0 OR AVG(r.rating) >= ${minRating})
       ORDER BY AVG(r.rating) DESC NULLS LAST, u.created_at DESC
       LIMIT ${limit} OFFSET ${offset}
     `;
