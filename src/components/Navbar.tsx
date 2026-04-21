@@ -1,17 +1,20 @@
 import React from 'react';
-import { MessageSquare, LogOut, Settings } from 'lucide-react';
+import { MessageSquare, LogOut, Settings, CalendarDays } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNotifications } from '../hooks/useNotifications';
 import { NotificationBell } from './NotificationBell';
+import type { Notification } from '../types';
 
 interface NavbarProps {
   onLoginClick: () => void;
   onSignupClick: () => void;
   onMessagesClick?: () => void;
+  onBookingsClick?: () => void;
   onEditProfile?: () => void;
+  onNotificationClick?: (n: Notification) => void;
 }
 
-export function Navbar({ onLoginClick, onSignupClick, onMessagesClick, onEditProfile }: NavbarProps) {
+export function Navbar({ onLoginClick, onSignupClick, onMessagesClick, onBookingsClick, onEditProfile, onNotificationClick }: NavbarProps) {
   const { currentUser, logout } = useAuth();
   const { notifications, unreadCount, markAsRead, markAllAsRead } = useNotifications(currentUser?.id);
 
@@ -38,6 +41,7 @@ export function Navbar({ onLoginClick, onSignupClick, onMessagesClick, onEditPro
                   unreadCount={unreadCount}
                   onMarkAsRead={markAsRead}
                   onMarkAllAsRead={markAllAsRead}
+                  onNotificationClick={onNotificationClick}
                 />
 
                 {onMessagesClick && (
@@ -47,6 +51,16 @@ export function Navbar({ onLoginClick, onSignupClick, onMessagesClick, onEditPro
                   >
                     <MessageSquare className="h-4 w-4 mr-2" />
                     Messages
+                  </button>
+                )}
+
+                {onBookingsClick && (
+                  <button
+                    onClick={onBookingsClick}
+                    className="flex items-center px-3 py-2 rounded-md text-sm font-medium text-blue-600 hover:text-blue-800 hover:bg-blue-50 transition-colors duration-200"
+                  >
+                    <CalendarDays className="h-4 w-4 mr-2" />
+                    Bookings
                   </button>
                 )}
 

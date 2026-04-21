@@ -16,9 +16,11 @@ const SPECIALIZATION_OPTIONS = [
 interface SearchFilterProps {
   onSearch: (filters: UserSearchFilters) => void;
   isLoading?: boolean;
+  role?: string;
 }
 
-export function SearchFilter({ onSearch, isLoading }: SearchFilterProps) {
+export function SearchFilter({ onSearch, isLoading, role }: SearchFilterProps) {
+  const isCA = role === 'ca';
   const [q, setQ] = useState('');
   const [specialization, setSpecialization] = useState('');
   const [minRating, setMinRating] = useState(0);
@@ -28,9 +30,9 @@ export function SearchFilter({ onSearch, isLoading }: SearchFilterProps) {
   const handleSearch = () => {
     onSearch({
       q: q.trim() || undefined,
-      specialization: specialization || undefined,
-      minRating: minRating > 0 ? minRating : undefined,
-      minExperience: minExperience > 0 ? minExperience : undefined,
+      specialization: !isCA && specialization ? specialization : undefined,
+      minRating: !isCA && minRating > 0 ? minRating : undefined,
+      minExperience: !isCA && minExperience > 0 ? minExperience : undefined,
     });
   };
 
@@ -42,7 +44,7 @@ export function SearchFilter({ onSearch, isLoading }: SearchFilterProps) {
     onSearch({});
   };
 
-  const hasActiveFilters = specialization || minRating > 0 || minExperience > 0;
+  const hasActiveFilters = !isCA && (specialization || minRating > 0 || minExperience > 0);
 
   return (
     <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
@@ -55,27 +57,29 @@ export function SearchFilter({ onSearch, isLoading }: SearchFilterProps) {
             value={q}
             onChange={e => setQ(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && handleSearch()}
-            placeholder="Search CAs by name or expertise..."
+            placeholder={isCA ? 'Search clients by name...' : 'Search CAs by name or expertise...'}
             className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-md text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
           />
         </div>
 
-        <button
-          onClick={() => setShowFilters(f => !f)}
-          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium border transition-colors ${
-            showFilters || hasActiveFilters
-              ? 'bg-blue-50 border-blue-300 text-blue-700'
-              : 'border-gray-300 text-gray-600 hover:border-gray-400'
-          }`}
-        >
-          <Filter className="h-4 w-4" />
-          Filters
-          {hasActiveFilters && (
-            <span className="bg-blue-600 text-white rounded-full h-4 w-4 text-xs flex items-center justify-center">
-              !
-            </span>
-          )}
-        </button>
+        {!isCA && (
+          <button
+            onClick={() => setShowFilters(f => !f)}
+            className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium border transition-colors ${
+              showFilters || hasActiveFilters
+                ? 'bg-blue-50 border-blue-300 text-blue-700'
+                : 'border-gray-300 text-gray-600 hover:border-gray-400'
+            }`}
+          >
+            <Filter className="h-4 w-4" />
+            Filters
+            {hasActiveFilters && (
+              <span className="bg-blue-600 text-white rounded-full h-4 w-4 text-xs flex items-center justify-center">
+                !
+              </span>
+            )}
+          </button>
+        )}
 
         <button
           onClick={handleSearch}
@@ -86,8 +90,8 @@ export function SearchFilter({ onSearch, isLoading }: SearchFilterProps) {
         </button>
       </div>
 
-      {/* Filter panel */}
-      {showFilters && (
+      {/* Filter panel — CA-only filters hidden for CA viewers */}
+      {!isCA && showFilters && (
         <div className="mt-4 pt-4 border-t border-gray-100 grid grid-cols-1 sm:grid-cols-3 gap-4">
           {/* Specialization */}
           <div>

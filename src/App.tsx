@@ -8,17 +8,21 @@ import { SignupForm } from './components/SignupForm';
 import { ProfilesGrid } from './components/ProfilesGrid';
 import { MessagingInterface } from './components/MessagingInterface';
 import { CAProfileEdit } from './components/CAProfileEdit';
+import { BookingsPage } from './pages/BookingsPage';
 import { useAuth } from './contexts/AuthContext';
+import type { Notification } from './types';
 import FinancialPlanning from './pages/FinancialPlanning';
 import CorporateLaw from './pages/CorporateLaw';
 import IncomeTax from './pages/IncomeTax';
 import Gst from './pages/Gst';
+import NotFound from './pages/NotFound';
 
 function AppContent() {
   const { currentUser, isLoading } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showSignup, setShowSignup] = useState(false);
   const [showMessages, setShowMessages] = useState(false);
+  const [showBookings, setShowBookings] = useState(false);
   const [showProfileEdit, setShowProfileEdit] = useState(false);
   const [contactUserId, setContactUserId] = useState<string | null>(null);
 
@@ -35,6 +39,17 @@ function AppContent() {
   const handleBackToProfiles = () => {
     setShowMessages(false);
     setContactUserId(null);
+  };
+
+  const handleNotificationClick = (n: Notification) => {
+    if (n.type === 'message') {
+      setShowBookings(false);
+      setContactUserId(null);
+      setShowMessages(true);
+    } else if (n.type.startsWith('appointment')) {
+      setShowMessages(false);
+      setShowBookings(true);
+    }
   };
 
   if (isLoading) {
@@ -136,13 +151,19 @@ function AppContent() {
     );
   }
 
+  if (showBookings) {
+    return <BookingsPage onBack={() => setShowBookings(false)} />;
+  }
+
   return (
     <div className="min-h-screen bg-gray-50">
       <Navbar
         onLoginClick={() => setShowLogin(true)}
         onSignupClick={() => setShowSignup(true)}
         onMessagesClick={handleMessagesClick}
+        onBookingsClick={() => setShowBookings(true)}
         onEditProfile={currentUser.role === 'ca' ? () => setShowProfileEdit(true) : undefined}
+        onNotificationClick={handleNotificationClick}
       />
 
       {showProfileEdit && currentUser.role === 'ca' && (
@@ -211,6 +232,7 @@ function App() {
               path="/topics/gst"
               element={<ErrorBoundary><Gst /></ErrorBoundary>}
             />
+            <Route path="*" element={<NotFound />} />
           </Routes>
         </ErrorBoundary>
       </AuthProvider>

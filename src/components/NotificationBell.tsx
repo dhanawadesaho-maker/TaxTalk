@@ -7,6 +7,7 @@ interface NotificationBellProps {
   unreadCount: number;
   onMarkAsRead: (id: string) => void;
   onMarkAllAsRead: () => void;
+  onNotificationClick?: (n: Notification) => void;
 }
 
 export function NotificationBell({
@@ -14,6 +15,7 @@ export function NotificationBell({
   unreadCount,
   onMarkAsRead,
   onMarkAllAsRead,
+  onNotificationClick,
 }: NotificationBellProps) {
   const [isOpen, setIsOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -64,7 +66,11 @@ export function NotificationBell({
               notifications.map(n => (
                 <div
                   key={n.id}
-                  onClick={() => !n.isRead && onMarkAsRead(n.id)}
+                  onClick={() => {
+                    if (!n.isRead) onMarkAsRead(n.id);
+                    onNotificationClick?.(n);
+                    setIsOpen(false);
+                  }}
                   className={`px-4 py-3 border-b border-gray-50 cursor-pointer hover:bg-gray-50 transition-colors ${
                     !n.isRead ? 'bg-blue-50' : ''
                   }`}

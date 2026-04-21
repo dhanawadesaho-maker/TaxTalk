@@ -35,7 +35,7 @@ export function ProfilesGrid({ onContact }: ProfilesGridProps) {
 
   return (
     <div>
-      <SearchFilter onSearch={handleSearch} isLoading={isLoading} />
+      <SearchFilter onSearch={handleSearch} isLoading={isLoading} role={currentUser.role} />
 
       {error && (
         <div className="bg-red-50 text-red-600 border border-red-200 rounded-md px-4 py-3 mb-4 text-sm">
@@ -47,14 +47,16 @@ export function ProfilesGrid({ onContact }: ProfilesGridProps) {
         <div className="text-center py-12 text-gray-500">Loading...</div>
       ) : users.length === 0 ? (
         <div className="text-center py-12">
-          <p className="text-gray-500 text-lg">No Chartered Accountants found.</p>
+          <p className="text-gray-500 text-lg">
+            {currentUser.role === 'ca' ? 'No clients found.' : 'No Chartered Accountants found.'}
+          </p>
           <p className="text-gray-400 text-sm mt-1">Try adjusting your search filters.</p>
         </div>
       ) : (
         <>
           {meta && (
             <p className="text-sm text-gray-500 mb-4">
-              Showing {users.length} of {meta.total} CAs
+              Showing {users.length} of {meta.total} {currentUser.role === 'ca' ? 'clients' : 'CAs'}
             </p>
           )}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
