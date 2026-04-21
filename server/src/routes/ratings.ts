@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { query } from '../db/client.js';
 import { requireAuth, AuthRequest } from '../middleware/auth.js';
 import { validateBody } from '../middleware/validate.js';
-import { badRequest, conflict, notFound } from '../utils/errors.js';
+import { badRequest, conflict, forbidden, notFound } from '../utils/errors.js';
 import { createNotification } from '../services/notifications.js';
 
 const router = Router();
@@ -62,6 +62,15 @@ router.post('/', requireAuth, validateBody(createRatingSchema), async (req: Auth
       SELECT id, full_name FROM users WHERE id = ${caId} AND role = 'ca'
     `;
     if (!ca) return next(notFound('CA'));
+
+    const completedAppt = await query<{ id: string }>`
+      SELECT id FROM appointments
+      WHERE client_id = ${req.user!.id} AND ca_id = ${caId} AND status = 'completed'
+      LIMIT 1
+    `;
+    if (completedAppt.length === 0) {
+      return next(forbidden('You can only review a CA after a completed appointment'));
+    }
 
     const existing = await query<{ id: string }>`
       SELECT id FROM ratings WHERE reviewer_id = ${req.user!.id} AND ca_id = ${caId}
