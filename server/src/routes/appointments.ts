@@ -55,16 +55,27 @@ router.get('/', requireAuth, async (req: AuthRequest, res: Response, next: NextF
     const userId = req.user!.id;
     const role = req.user!.role;
 
-    const appointments = await query<AppointmentRow>`
-      SELECT a.*,
-        client.full_name AS client_name,
-        ca.full_name AS ca_name
-      FROM appointments a
-      JOIN users client ON client.id = a.client_id
-      JOIN users ca ON ca.id = a.ca_id
-      WHERE ${role === 'ca' ? query`a.ca_id = ${userId}` : query`a.client_id = ${userId}`}
-      ORDER BY a.scheduled_time DESC
-    `;
+    const appointments = role === 'ca'
+      ? await query<AppointmentRow>`
+          SELECT a.*,
+            client.full_name AS client_name,
+            ca.full_name AS ca_name
+          FROM appointments a
+          JOIN users client ON client.id = a.client_id
+          JOIN users ca ON ca.id = a.ca_id
+          WHERE a.ca_id = ${userId}
+          ORDER BY a.scheduled_time DESC
+        `
+      : await query<AppointmentRow>`
+          SELECT a.*,
+            client.full_name AS client_name,
+            ca.full_name AS ca_name
+          FROM appointments a
+          JOIN users client ON client.id = a.client_id
+          JOIN users ca ON ca.id = a.ca_id
+          WHERE a.client_id = ${userId}
+          ORDER BY a.scheduled_time DESC
+        `;
 
     res.json({ success: true, data: appointments.map(formatAppointment) });
   } catch (err) {
