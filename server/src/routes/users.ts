@@ -89,7 +89,7 @@ router.get('/search', requireAuth, async (req: AuthRequest, res: Response, next:
           OR u.bio ILIKE ${'%' + q + '%'}
         )
         AND (${specialization} = '' OR cs.specialization = ${specialization})
-        AND u.work_experience >= ${minExperience}
+        AND COALESCE(u.work_experience, 0) >= ${minExperience}
       GROUP BY u.id
       HAVING ${minRating} = 0 OR AVG(r.rating) >= ${minRating}
       ORDER BY AVG(r.rating) DESC NULLS LAST, u.created_at DESC
